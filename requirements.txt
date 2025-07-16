@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+python-dotenv
+
+# Para pruebas
+pytest
+httpx
+coverage
+
+# Para manejo de tipos y validación
+pydantic
