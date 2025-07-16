@@ -25,12 +25,25 @@ def listar_usuarios():
 
 @app.get("/usuarios/{alias}")
 def get_usuario(alias: str):
-    cur.execute("SELECT alias, nombre FROM usuarios WHERE alias = %s;", (alias,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    a, n = row
-    return {"alias": a, "nombre": n}
+    try:
+        cur.execute("SELECT alias, nombre FROM usuarios WHERE alias = %s;", (alias,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        a, n = row
+        return {"alias": a, "nombre": n}
+
+    except DatabaseError as e:
+        connect.rollback()
+        raise HTTPException(status_code=500, detail=f"Error de BD: {e.pgerror or str(e)}")
+
+    except HTTPException:
+        # Re-lanzamos los 404 (u otros HTTPException) sin convertirlos en 500
+        raise
+
+    except Exception as e:
+        # Cualquier otra excepción → 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/usuarios/{alias}/rides")
 def listar_rides(alias: str):
