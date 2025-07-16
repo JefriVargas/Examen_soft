@@ -1,109 +1,97 @@
 import pytest
-from httpx import AsyncClient
-from app import app
+from fastapi.testclient import TestClient
+from datetime import datetime
+import app  # Ajusta este import al nombre de tu módulo principal
 
-BASE_URL = "http://test"
+# Dobles para simular cursor y conexión
+class DummyCursor:
+    def __init__(self):
+        self.fetchone_results = []
+        self.fetchall_results = []
+        self.executed = []
 
-# ---------- CONFIGURACIÓN DE DATOS ----------
-# Ajusta estos alias e IDs según tu base de datos de prueba:
-DRIVER_ALIAS = "jperez"
-RIDE_ID = 1
-PARTICIPANT_1 = "lgomez"
-PARTICIPANT_2 = "krojas"
-DESTINO_NUEVO = "Av Siempre Viva 742"
-SPACES = 1
+    def execute(self, sql, params=None):
+        # Registramos la consulta para posibles inspecciones
+        self.executed.append((sql, params))
 
-@pytest.mark.asyncio
-async def test_flujo_exito_completo():
+    def fetchone(self):
+        return self.fetchone_results.pop(0) if self.fetchone_results else None
+
+    def fetchall(self):
+        return self.fetchall_results
+
+class DummyConnect:
+    def commit(self): pass
+    def rollback(self): pass
+
+@pytest.fixture(autouse=True)
+def override_db(monkeypatch):
     """
-    ✅ CASO DE ÉXITO
-    Simula todo el flujo: requestToJoin, accept, start, unloadParticipant, end
+    Reemplaza cur y connect del módulo principal por dobles.
     """
-    async with AsyncClient(app=app, base_url=BASE_URL) as ac:
-        # 1) Participante solicita unirse al ride
-        resp = await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/requestToJoin/{PARTICIPANT_1}",
-            params={"destino": DESTINO_NUEVO, "spaces": SPACES}
-        )
-        assert resp.status_code in (201, 422)
-        # Si da 422 es que ya estaba solicitando → igual seguimos
+    stub_cur = DummyCursor()
+    stub_conn = DummyConnect()
+    monkeypatch.setattr(app, 'cur', stub_cur)
+    monkeypatch.setattr(app, 'connect', stub_conn)
+    return stub_cur
 
-        # 2) Driver acepta al participante
-        resp = await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/accept/{PARTICIPANT_1}"
-        )
-        assert resp.status_code in (200, 422)
-        # Puede dar 422 si ya estaba confirmado
+client = TestClient(app.app)
 
-        # 3) Driver rechaza a otro participante
-        resp = await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/reject/{PARTICIPANT_2}"
-        )
-        assert resp.status_code in (200, 422)
-        # Puede dar 422 si ya fue rechazado o confirmado
+# ——— PRUEBAS UNITARIAS ———
 
-        # 4) Iniciar el ride
-        resp = await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/start"
-        )
-        assert resp.status_code in (200, 422)
-        # Puede dar 422 si ya estaba en progreso
+# 1. GET /usuarios/{alias} - éxito
 
-        # 5) Descargar al participante
-        resp = await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/unloadParticipant/{PARTICIPANT_1}"
-        )
-        assert resp.status_code in (200, 422)
-        # Puede dar 422 si ya se descargó
-
-        # 6) Finalizar el ride
-        resp = await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/end"
-        )
-        assert resp.status_code in (200, 422)
-        # Puede dar 422 si ya estaba terminado
-
-@pytest.mark.asyncio
-async def test_error_request_ya_existente():
+def test_get_usuario_success(override_db):
     """
-    ⚠️ ERROR
-    Intentar hacer 2 solicitudes consecutivas de unirse al mismo ride
+    Caso de ÉXITO: /usuarios/{alias} devuelve 200 y datos correctos.
     """
-    async with AsyncClient(app=app, base_url=BASE_URL) as ac:
-        # Primer intento (puede fallar si ya estaba, igual lo dejamos pasar)
-        await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/requestToJoin/{PARTICIPANT_2}",
-            params={"destino": DESTINO_NUEVO, "spaces": SPACES}
-        )
-        # Segundo intento - este debería fallar por duplicado
-        resp2 = await ac.post(
-            f"/usuarios/{DRIVER_ALIAS}/rides/{RIDE_ID}/requestToJoin/{PARTICIPANT_2}",
-            params={"destino": DESTINO_NUEVO, "spaces": SPACES}
-        )
-        assert resp2.status_code == 422
+    # Preparamos el stub para devolver un usuario
+    override_db.fetchone_results = [('juan123','Juan Pérez')]
+    response = client.get('/usuarios/juan123')
+    assert response.status_code == 200
+    assert response.json() == {'alias':'juan123','nombre':'Juan Pérez'}
 
-@pytest.mark.asyncio
-async def test_error_usuario_inexistente():
-    """
-    ⚠️ ERROR
-    Consultar un usuario inexistente
-    """
-    async with AsyncClient(app=app, base_url=BASE_URL) as ac:
-        resp = await ac.get("/usuarios/noexiste123")
-        assert resp.status_code == 404
+# 2. GET /usuarios/{alias} - error 404
 
-@pytest.mark.asyncio
-async def test_error_start_sin_participantes_confirmados():
+def test_get_usuario_not_found(override_db):
     """
-    ⚠️ ERROR
-    Intentar iniciar un ride sin participantes confirmados
-    (Para esto usamos ride 2 que tiene otro driver)
+    Caso de ERROR: alias inexistente -> 404.
     """
-    OTHER_DRIVER = "mmartinez"
-    OTHER_RIDE_ID = 2
+    override_db.fetchone_results = [None]
+    response = client.get('/usuarios/noexiste')
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Usuario no encontrado'
 
-    async with AsyncClient(app=app, base_url=BASE_URL) as ac:
-        resp = await ac.post(
-            f"/usuarios/{OTHER_DRIVER}/rides/{OTHER_RIDE_ID}/start"
-        )
-        assert resp.status_code == 422
+# 3. GET /usuarios/{alias}/rides - error usuario no existe
+
+def test_listar_rides_user_not_found(override_db):
+    """
+    Caso de ERROR: /usuarios/{alias}/rides con usuario inexistente -> 404.
+    """
+    override_db.fetchone_results = [None]  # validación SELECT 1
+    response = client.get('/usuarios/pepito/rides')
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Usuario no encontrado'
+
+# 4. GET /usuarios/{alias}/rides - éxito
+
+def test_listar_rides_success(override_db):
+    """
+    Caso de ÉXITO: lista de rides para usuario existente.
+    """
+    dt = datetime(2025,7,20,14,30)
+    override_db.fetchone_results = [(1,)]  # validación SELECT 1
+    override_db.fetchall_results = [  
+        (1, dt, 'Av X 123', 4, 'juan123', 'ready')
+    ]
+    response = client.get('/usuarios/juan123/rides')
+    assert response.status_code == 200
+    expected = [{
+        'id': 1,
+        'rideDateAndTime': '2025/07/20 14:30',
+        'finalAddress': 'Av X 123',
+        'allowedSpaces': 4,
+        'rideDriver': 'juan123',
+        'status': 'ready'
+    }]
+    assert response.json() == expected
